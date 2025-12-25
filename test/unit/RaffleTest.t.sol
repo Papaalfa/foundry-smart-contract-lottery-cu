@@ -5,8 +5,12 @@ import {Test} from "forge-std/Test.sol";
 import {Raffle} from "../../src/Raffle.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeployRaffle} from "../../script/DeployRaffle.s.sol";
+import {Vm} from "forge-std/Vm.sol";
+import {VRFCoordinatorV2_5Mock} from "@chainlink/contracts/src/v0.8/vrf/mocks/VRFCoordinatorV2_5Mock.sol";
 
-contract RaggleTest is Test {
+//import {LinkToken} from "test/mocks/LinkToken.sol";
+
+contract RaffleTest is Test {
     Raffle public raffle;
     HelperConfig public helperConfig;
 
@@ -14,8 +18,9 @@ contract RaggleTest is Test {
     uint256 interval;
     address vrfCoordinator;
     bytes32 gasLane;
-    uint64 subscriptionId;
+    uint256 subscriptionId;
     uint32 callbackGasLimit;
+    address link;
 
     address public player = makeAddr("player");
     uint256 public constant STARTING_PLAYER_BALANCE = 10 ether;
@@ -35,6 +40,7 @@ contract RaggleTest is Test {
         gasLane = config.gasLane;
         subscriptionId = config.subscriptionId;
         callbackGasLimit = config.callbackGasLimit;
+        link = config.link;
 
         vm.deal(player, STARTING_PLAYER_BALANCE);
     }
@@ -43,7 +49,17 @@ contract RaggleTest is Test {
         assert(raffle.getRaffleState() == Raffle.RaffleState.OPEN);
     }
 
-    /** ---------- enterRaffle Tests ---------- */
+    modifier raffleEntered() {
+        vm.prank(player);
+        raffle.enterRaffle{value: entranceFee}();
+        vm.warp(block.timestamp + interval + 1);
+        vm.roll(block.number + 1);
+        _;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ENTERRAFFLE TESTS
+    //////////////////////////////////////////////////////////////*/
 
     function testRaffleRevertsWhenYouDontPayEnough() public {
         // Arrange
@@ -70,5 +86,109 @@ contract RaggleTest is Test {
         vm.expectEmit(true, false, false, false, address(raffle));
         emit RaffleEntered(player);
         raffle.enterRaffle{value: entranceFee}();
+    }
+
+    function testCannotEnterWhenRaffleIsCalculating() public raffleEntered {
+        // Arrange
+        raffle.performUpkeep("");
+
+        // Act & Assert
+        vm.prank(player);
+        vm.expectRevert(Raffle.Raffle__RaffleNotOpen.selector);
+        raffle.enterRaffle{value: entranceFee}();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              UPKEEP TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function testCheckUpkeepReturnsFalseIfNoBalance() public {
+        // Arrange
+        vm.warp(block.timestamp + interval + 1);
+        vm.roll(block.number + 1);
+        // Act
+        (bool upkeepNeeded, ) = raffle.checkUpkeep("");
+        // Assert
+        assert(!upkeepNeeded);
+    }
+
+    function testCheckUpkeepReturnsFalseIfRaffleNotOpen() public raffleEntered {
+        // Arrange
+        raffle.performUpkeep("");
+
+        // Act
+        (bool upkeepNeeded, ) = raffle.checkUpkeep("");
+        // Assert
+        assert(!upkeepNeeded);
+    }
+
+    // Challenge
+    function testCheckUpkeepReturnsFalseIfNotEnoughTimeHasPassed() public {
+        // Arrange
+        vm.prank(player);
+        raffle.enterRaffle{value: entranceFee}();
+        vm.warp(block.timestamp + (interval - 1));
+        vm.roll(block.number + 1);
+        // Act
+        (bool upkeepNeeded, ) = raffle.checkUpkeep("");
+        // Assert
+        assert(!upkeepNeeded);
+    }
+
+    function testCheckUpkeepReturnsTrueWhenParametersAreGood() public raffleEntered {
+        // Act
+        (bool upkeepNeeded, ) = raffle.checkUpkeep("");
+        // Assert
+        assert(upkeepNeeded);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             PERFORM UPKEEP
+    //////////////////////////////////////////////////////////////*/
+
+    function testPerformUpkeepCanOnlyRunIfCheckUpkeepIsTrue() public raffleEntered {
+        // Act & Assert
+        raffle.performUpkeep("");
+    }
+
+    function testPerformUpkeepRevertsIfCheckUpkeepIsFalse() public {
+        // Arrange
+        uint256 currentBalance = 0;
+        uint256 numPlayers = 0;
+        Raffle.RaffleState rState = raffle.getRaffleState();
+
+        vm.prank(player);
+        raffle.enterRaffle{value: entranceFee}();
+        currentBalance += entranceFee;
+        numPlayers = 1;
+
+        // Act & Assert
+        vm.expectRevert(
+            abi.encodeWithSelector(Raffle.Raffle__UpkeepNotNeeded.selector, currentBalance, numPlayers, rState)
+        );
+        raffle.performUpkeep("");
+    }
+
+    function testPerformUpkeepUpdatesRaffleStateAndEmitsRequestId() public raffleEntered {
+        // Act
+        vm.recordLogs();
+        raffle.performUpkeep("");
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 requestIdTopic = entries[1].topics[1];
+
+        // Assert
+        Raffle.RaffleState rState = raffle.getRaffleState();
+        assert(uint256(requestIdTopic) > 0);
+        assert(uint256(rState) == 1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         FULLFILL RANDOM WORDS
+    //////////////////////////////////////////////////////////////*/
+
+    function testFulfillRandomWordsCanOnlyBeCalledAfterPerformUpkeep(uint256 randomRequestId) public raffleEntered {
+        // Act & Assert
+        vm.expectRevert(VRFCoordinatorV2_5Mock.InvalidRequest.selector);
+        VRFCoordinatorV2_5Mock(vrfCoordinator).fulfillRandomWords(randomRequestId, address(raffle));
     }
 }

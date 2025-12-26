@@ -50,7 +50,7 @@ contract DeployRaffle is Script {
         return (raffle, helperConfig);
     }
 
-    function run() external {
-        deployRaffle();
+    function run() external returns (Raffle, HelperConfig) {
+        return deployRaffle();
     }
 }
